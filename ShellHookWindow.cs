@@ -50,6 +50,14 @@ public class ShellHookWindow : IDisposable
         RegisterShellHookWindow(_hwnd);
     }
 
+    public void Stop()
+    {
+        if (_hwnd != IntPtr.Zero)
+        {
+            UnregisterShellHookWindow(_hwnd);
+        }
+    }
+
     private IntPtr WndProc(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam)
     {
         if (msg == _msgShellHook)

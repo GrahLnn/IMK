@@ -32,6 +32,15 @@ public class WindowMonitor : IDisposable
         _shellHook.Start();
     }
 
+    public void Stop()
+    {
+        lock (_lock)
+        {
+            _confirmationCts?.Cancel();
+        }
+        _shellHook?.Stop();
+    }
+
     // Note: Event handlers are often async void, which is acceptable here.
     private async void OnShellWindowActivated(IntPtr activatedHwnd) // activatedHwnd might be transient
     {
