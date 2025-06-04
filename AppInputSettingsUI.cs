@@ -8,6 +8,7 @@ using System.IO;
 using System.Linq;
 using System.Text.Json;
 using System.Windows.Forms;
+using System.Reflection;
 
 public class AppInputSettingsUI : Form
 {
@@ -241,8 +242,19 @@ public class IMKTrayApp : ApplicationContext
                 }
             });
 
+            // 开机自启菜单项
+            var autoStartMenuItem = new ToolStripMenuItem();
+            UpdateAutoStartMenuItem(autoStartMenuItem);
+            autoStartMenuItem.Click += (_, _) =>
+            {
+                bool currentState = IsAutoStartEnabled();
+                SetAutoStart(!currentState);
+                UpdateAutoStartMenuItem(autoStartMenuItem);
+            };
+
             // 分隔线
-            var separator = new ToolStripSeparator();
+            var separator1 = new ToolStripSeparator();
+            var separator2 = new ToolStripSeparator();
 
             // 退出菜单项
             var exitMenuItem = new ToolStripMenuItem("退出", null, (_, _) =>
@@ -257,7 +269,9 @@ public class IMKTrayApp : ApplicationContext
             contextMenu.Items.Add(settingsMenuItem);
             contextMenu.Items.Add(openConfigMenuItem);
             contextMenu.Items.Add(openConfigDirMenuItem);
-            contextMenu.Items.Add(separator);
+            contextMenu.Items.Add(separator1);
+            contextMenu.Items.Add(autoStartMenuItem);
+            contextMenu.Items.Add(separator2);
             contextMenu.Items.Add(exitMenuItem);
 
             trayIcon.ContextMenuStrip = contextMenu;
@@ -306,5 +320,134 @@ public class IMKTrayApp : ApplicationContext
             monitor?.Stop();
         }
         base.Dispose(disposing);
+    }
+
+    // 开机自启相关方法
+    private string GetStartupShortcutPath()
+    {
+        string startupFolder = Environment.GetFolderPath(Environment.SpecialFolder.Startup);
+        return Path.Combine(startupFolder, "IMK 输入法管理器.lnk");
+    }
+
+    private bool IsAutoStartEnabled()
+    {
+        string shortcutPath = GetStartupShortcutPath();
+        string batPath = shortcutPath.Replace(".lnk", ".bat");
+        return File.Exists(shortcutPath) || File.Exists(batPath);
+    }
+
+    private void SetAutoStart(bool enable)
+    {
+        try
+        {
+            string shortcutPath = GetStartupShortcutPath();
+            string batPath = shortcutPath.Replace(".lnk", ".bat");
+            
+            if (enable)
+            {
+                // 创建快捷方式
+                CreateShortcut(shortcutPath);
+                MessageBox.Show("开机自启已启用", "设置成功", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            }
+            else
+            {
+                // 删除快捷方式
+                if (File.Exists(shortcutPath))
+                {
+                    File.Delete(shortcutPath);
+                }
+                if (File.Exists(batPath))
+                {
+                    File.Delete(batPath);
+                }
+                MessageBox.Show("开机自启已禁用", "设置成功", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            }
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show($"设置开机自启失败：{ex.Message}", "错误", MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
+    }
+
+    private void CreateShortcut(string shortcutPath)
+    {
+        try
+        {
+            // 获取当前程序的完整路径
+            string exePath = Assembly.GetExecutingAssembly().Location;
+            if (exePath.EndsWith(".dll"))
+            {
+                // 如果是dll，需要找到对应的exe文件
+                exePath = exePath.Replace(".dll", ".exe");
+            }
+
+            // 使用PowerShell创建快捷方式
+            string script = $@"
+$WshShell = New-Object -comObject WScript.Shell
+$Shortcut = $WshShell.CreateShortcut('{shortcutPath}')
+$Shortcut.TargetPath = '{exePath}'
+$Shortcut.WorkingDirectory = '{Path.GetDirectoryName(exePath)}'
+$Shortcut.Description = 'IMK 输入法管理器'
+$Shortcut.Save()
+";
+
+            var startInfo = new ProcessStartInfo
+            {
+                FileName = "powershell.exe",
+                Arguments = $"-Command \"{script}\"",
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                WindowStyle = ProcessWindowStyle.Hidden
+            };
+
+            using (var process = Process.Start(startInfo))
+            {
+                process?.WaitForExit();
+            }
+        }
+        catch (Exception)
+        {
+            // 如果PowerShell方法失败，使用COM接口
+            CreateShortcutWithCOM(shortcutPath);
+        }
+    }
+
+    private void CreateShortcutWithCOM(string shortcutPath)
+    {
+        // 简化版本：直接复制exe到启动文件夹（不是最佳做法，但作为备选方案）
+        string exePath = Assembly.GetExecutingAssembly().Location;
+        if (exePath.EndsWith(".dll"))
+        {
+            exePath = exePath.Replace(".dll", ".exe");
+        }
+        
+        string startupFolder = Path.GetDirectoryName(shortcutPath)!;
+        string targetExePath = Path.Combine(startupFolder, "IMK.exe");
+        
+        // 如果目标位置没有exe文件，复制一份
+        if (!File.Exists(targetExePath))
+        {
+            File.Copy(exePath, targetExePath, true);
+        }
+        
+        // 创建一个简单的批处理文件作为启动脚本
+        string batPath = Path.Combine(startupFolder, "IMK 输入法管理器.bat");
+        File.WriteAllText(batPath, $@"@echo off
+cd /d ""{Path.GetDirectoryName(exePath)}""
+start """" ""{exePath}""
+");
+        
+        // 将批处理文件重命名为快捷方式路径（作为标记）
+        if (File.Exists(batPath))
+        {
+            File.Move(batPath, shortcutPath.Replace(".lnk", ".bat"));
+        }
+    }
+
+    private void UpdateAutoStartMenuItem(ToolStripMenuItem menuItem)
+    {
+        bool currentState = IsAutoStartEnabled();
+        menuItem.Text = currentState ? "✓ 禁用开机自启" : "启用开机自启";
+        menuItem.Checked = currentState;
     }
 }

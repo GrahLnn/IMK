@@ -54,7 +54,15 @@ public class ShellHookWindow : IDisposable
     {
         if (_hwnd != IntPtr.Zero)
         {
-            UnregisterShellHookWindow(_hwnd);
+            try
+            {
+                UnregisterShellHookWindow(_hwnd);
+            }
+            catch (Exception)
+            {
+                // 忽略UnregisterShellHookWindow的错误，某些Windows版本可能不支持
+                // 这不是致命错误，程序可以继续运行
+            }
         }
     }
 
@@ -74,8 +82,24 @@ public class ShellHookWindow : IDisposable
     {
         if (_hwnd != IntPtr.Zero)
         {
-            UnregisterShellHookWindow(_hwnd);
-            DestroyWindow(_hwnd);
+            try
+            {
+                UnregisterShellHookWindow(_hwnd);
+            }
+            catch (Exception)
+            {
+                // 忽略UnregisterShellHookWindow的错误
+            }
+            
+            try
+            {
+                DestroyWindow(_hwnd);
+            }
+            catch (Exception)
+            {
+                // 忽略DestroyWindow的错误
+            }
+            
             _hwnd = IntPtr.Zero;
         }
     }
@@ -125,7 +149,7 @@ public class ShellHookWindow : IDisposable
     [DllImport("user32.dll")]
     private static extern bool RegisterShellHookWindow(IntPtr hWnd);
 
-    [DllImport("user32.dll")]
+    [DllImport("user32.dll", SetLastError = true)]
     private static extern bool UnregisterShellHookWindow(IntPtr hWnd);
 
     [DllImport("user32.dll")]
