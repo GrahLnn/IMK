@@ -10,6 +10,15 @@ pub struct InputConfig {
     pub chinese: HashSet<String>,
 }
 
+impl Default for InputConfig {
+    fn default() -> Self {
+        Self {
+            eng: HashSet::new(),
+            chinese: HashSet::new(),
+        }
+    }
+}
+
 #[derive(Debug, Deserialize, Serialize)]
 struct RawConfig {
     #[serde(default, rename = "ENG")]
