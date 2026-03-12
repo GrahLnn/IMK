@@ -1,9 +1,13 @@
+use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+
+use crate::core::config::{load_config_or_default, update_caps_interceptor};
 
 use windows::core::w;
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows::Win32::System::Threading::CREATE_NO_WINDOW;
 use windows::Win32::UI::Shell::{
     Shell_NotifyIconW, NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NOTIFYICONDATAW,
 };
@@ -11,8 +15,9 @@ use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW,
     GetCursorPos, GetMessageW, GetWindowLongPtrW, LoadIconW, PostQuitMessage, RegisterClassW,
     SetForegroundWindow, SetWindowLongPtrW, TrackPopupMenu, TranslateMessage, CREATESTRUCTW,
-    GWLP_USERDATA, IDI_APPLICATION, MF_SEPARATOR, MF_STRING, MSG, TPM_RIGHTBUTTON, WNDCLASSW,
-    WM_APP, WM_COMMAND, WM_DESTROY, WM_LBUTTONDBLCLK, WM_NCCREATE, WM_RBUTTONUP, WS_OVERLAPPED,
+    GWLP_USERDATA, IDI_APPLICATION, MF_CHECKED, MF_SEPARATOR, MF_STRING, MF_UNCHECKED, MSG,
+    TPM_RIGHTBUTTON, WM_APP, WM_COMMAND, WM_DESTROY, WM_LBUTTONDBLCLK, WM_NCCREATE, WM_RBUTTONUP,
+    WNDCLASSW, WS_OVERLAPPED,
 };
 
 const TRAY_MESSAGE: u32 = WM_APP + 1;
@@ -21,13 +26,15 @@ const TRAY_ID: u32 = 1;
 const ID_OPEN_SETTINGS: usize = 1001;
 const ID_OPEN_CONFIG: usize = 1002;
 const ID_OPEN_CONFIG_DIR: usize = 1003;
-const ID_TOGGLE_AUTOSTART: usize = 1004;
-const ID_EXIT: usize = 1005;
+const ID_TOGGLE_CAPS_INTERCEPTOR: usize = 1004;
+const ID_TOGGLE_AUTOSTART: usize = 1005;
+const ID_EXIT: usize = 1006;
 
 struct TrayState {
     config_path: PathBuf,
     on_open_settings: Arc<dyn Fn() + Send + Sync>,
     on_exit: Arc<dyn Fn() + Send + Sync>,
+    on_toggle_caps: Arc<dyn Fn(bool) + Send + Sync>,
 }
 
 pub struct Tray {
@@ -54,6 +61,7 @@ impl Tray {
                 config_path: default_config_path(),
                 on_open_settings: Arc::new(|| {}),
                 on_exit: Arc::new(|| {}),
+                on_toggle_caps: Arc::new(|_| {}),
             });
             let state_ptr = Box::into_raw(state);
 
@@ -66,9 +74,9 @@ impl Tray {
                 0,
                 0,
                 0,
-                HWND(0 as _),
                 None,
-                hinstance,
+                None,
+                Some(hinstance.into()),
                 Some(state_ptr as _),
             )
             .unwrap_or_default();
@@ -90,15 +98,17 @@ impl Tray {
         }
     }
 
-    pub fn set_callbacks<F, G>(&mut self, on_open_settings: F, on_exit: G)
+    pub fn set_callbacks<F, G, H>(&mut self, on_open_settings: F, on_exit: G, on_toggle_caps: H)
     where
         F: Fn() + Send + Sync + 'static,
         G: Fn() + Send + Sync + 'static,
+        H: Fn(bool) + Send + Sync + 'static,
     {
         unsafe {
             if !self.state_ptr.is_null() {
                 (*self.state_ptr).on_open_settings = Arc::new(on_open_settings);
                 (*self.state_ptr).on_exit = Arc::new(on_exit);
+                (*self.state_ptr).on_toggle_caps = Arc::new(on_toggle_caps);
             }
         }
     }
@@ -106,7 +116,7 @@ impl Tray {
     pub fn run_message_loop(&self) {
         unsafe {
             let mut msg = MSG::default();
-            while GetMessageW(&mut msg, HWND(0 as _), 0, 0).0 != 0 {
+            while GetMessageW(&mut msg, None, 0, 0).0 != 0 {
                 let _ = TranslateMessage(&msg);
                 DispatchMessageW(&msg);
             }
@@ -141,18 +151,18 @@ unsafe extern "system" fn tray_wnd_proc(
     lparam: LPARAM,
 ) -> LRESULT {
     if msg == WM_NCCREATE {
-        let create: &CREATESTRUCTW = &*(lparam.0 as *const CREATESTRUCTW);
-        let _ = SetWindowLongPtrW(hwnd, GWLP_USERDATA, create.lpCreateParams as isize);
+        let create: &CREATESTRUCTW = unsafe { &*(lparam.0 as *const CREATESTRUCTW) };
+        let _ = unsafe { SetWindowLongPtrW(hwnd, GWLP_USERDATA, create.lpCreateParams as isize) };
     }
 
-    let state_ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut TrayState;
+    let state_ptr = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) } as *mut TrayState;
     if !state_ptr.is_null() {
-        let state = &*state_ptr;
+        let state = unsafe { &*state_ptr };
         match msg {
             TRAY_MESSAGE => {
                 let event = lparam.0 as u32;
                 if event == WM_RBUTTONUP {
-                    show_tray_menu(hwnd);
+                    show_tray_menu(hwnd, state);
                 } else if event == WM_LBUTTONDBLCLK {
                     (state.on_open_settings)();
                 }
@@ -164,36 +174,58 @@ unsafe extern "system" fn tray_wnd_proc(
                 return LRESULT(0);
             }
             WM_DESTROY => {
-                PostQuitMessage(0);
+                unsafe { PostQuitMessage(0) };
                 return LRESULT(0);
             }
             _ => {}
         }
     }
 
-    DefWindowProcW(hwnd, msg, wparam, lparam)
+    unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
 }
 
-fn show_tray_menu(hwnd: HWND) {
+fn show_tray_menu(hwnd: HWND, state: &TrayState) {
     unsafe {
         let _ = SetForegroundWindow(hwnd);
         let mut point = POINT::default();
         let _ = GetCursorPos(&mut point);
 
         let menu = CreatePopupMenu().unwrap_or_default();
-        build_menu(menu);
-        let _ = TrackPopupMenu(menu, TPM_RIGHTBUTTON, point.x, point.y, 0, hwnd, None);
+        let caps_enabled = load_config_or_default(&state.config_path).caps_interceptor;
+        let autostart_enabled = is_autostart_enabled();
+        build_menu(menu, caps_enabled, autostart_enabled);
+        let _ = TrackPopupMenu(menu, TPM_RIGHTBUTTON, point.x, point.y, Some(0), hwnd, None);
         let _ = windows::Win32::UI::WindowsAndMessaging::DestroyMenu(menu);
     }
 }
 
-fn build_menu(menu: windows::Win32::UI::WindowsAndMessaging::HMENU) {
+fn build_menu(
+    menu: windows::Win32::UI::WindowsAndMessaging::HMENU,
+    caps_enabled: bool,
+    autostart_enabled: bool,
+) {
     unsafe {
         let _ = AppendMenuW(menu, MF_STRING, ID_OPEN_SETTINGS, w!("打开设置"));
         let _ = AppendMenuW(menu, MF_STRING, ID_OPEN_CONFIG, w!("打开配置文件"));
         let _ = AppendMenuW(menu, MF_STRING, ID_OPEN_CONFIG_DIR, w!("打开配置文件夹"));
         let _ = AppendMenuW(menu, MF_SEPARATOR, 0, w!(""));
-        let _ = AppendMenuW(menu, MF_STRING, ID_TOGGLE_AUTOSTART, w!("开机自启"));
+        let caps_flags = if caps_enabled {
+            MF_STRING | MF_CHECKED
+        } else {
+            MF_STRING | MF_UNCHECKED
+        };
+        let autostart_flags = if autostart_enabled {
+            MF_STRING | MF_CHECKED
+        } else {
+            MF_STRING | MF_UNCHECKED
+        };
+        let _ = AppendMenuW(
+            menu,
+            caps_flags,
+            ID_TOGGLE_CAPS_INTERCEPTOR,
+            w!("Caps 拦截"),
+        );
+        let _ = AppendMenuW(menu, autostart_flags, ID_TOGGLE_AUTOSTART, w!("开机自启"));
         let _ = AppendMenuW(menu, MF_SEPARATOR, 0, w!(""));
         let _ = AppendMenuW(menu, MF_STRING, ID_EXIT, w!("退出"));
     }
@@ -208,6 +240,12 @@ fn handle_command(id: usize, state: &TrayState) {
                 open_path(dir);
             }
         }
+        ID_TOGGLE_CAPS_INTERCEPTOR => {
+            let current = load_config_or_default(&state.config_path).caps_interceptor;
+            let next = !current;
+            let _ = update_caps_interceptor(&state.config_path, next);
+            (state.on_toggle_caps)(next);
+        }
         ID_TOGGLE_AUTOSTART => toggle_autostart(),
         ID_EXIT => (state.on_exit)(),
         _ => {}
@@ -215,16 +253,22 @@ fn handle_command(id: usize, state: &TrayState) {
 }
 
 fn open_path(path: impl AsRef<Path>) {
-    let _ = std::process::Command::new("explorer").arg(path.as_ref()).spawn();
+    let _ = std::process::Command::new("explorer")
+        .arg(path.as_ref())
+        .spawn();
 }
 
 fn default_config_path() -> PathBuf {
-    let base = std::env::var_os("APPDATA").map(PathBuf::from).unwrap_or_default();
+    let base = std::env::var_os("APPDATA")
+        .map(PathBuf::from)
+        .unwrap_or_default();
     base.join("IMK").join("default_input_config.json")
 }
 
 fn startup_folder() -> PathBuf {
-    let base = std::env::var_os("APPDATA").map(PathBuf::from).unwrap_or_default();
+    let base = std::env::var_os("APPDATA")
+        .map(PathBuf::from)
+        .unwrap_or_default();
     base.join("Microsoft")
         .join("Windows")
         .join("Start Menu")
@@ -262,8 +306,12 @@ fn set_autostart(enable: bool) -> std::io::Result<()> {
             exe.parent().unwrap_or(Path::new("")).display()
         );
         let _ = std::process::Command::new("powershell.exe")
+            .arg("-NoProfile")
+            .arg("-WindowStyle")
+            .arg("Hidden")
             .arg("-Command")
             .arg(script)
+            .creation_flags(CREATE_NO_WINDOW.0)
             .spawn();
     } else {
         if shortcut.exists() {

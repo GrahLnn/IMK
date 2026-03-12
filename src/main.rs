@@ -1,13 +1,16 @@
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 use std::path::PathBuf;
 use std::process::Command;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use gpui::Application;
 
-use imk::core::config::InputConfig;
+use imk::core::config::{load_config_or_default, InputConfig};
 use imk::core::mode_manager::{InputMode as CoreInputMode, ModeDecision};
 use imk::platform_win::ime::{ImeController, InputMode as ImeInputMode};
 use imk::platform_win::winapi::get_process_name;
+use imk::service::caps_interceptor::CapsInterceptor;
 use imk::service::window_monitor::WindowMonitor;
 use imk::tray::tray::Tray;
 use imk::ui::settings::SettingsWindow;
@@ -34,6 +37,7 @@ fn run_settings_window() {
 fn run_tray_app() {
     let config_path = default_config_path();
     let ime = Arc::new(ImeController::new());
+    let caps_interceptor = Arc::new(Mutex::new(CapsInterceptor::new()));
     let mut monitor = WindowMonitor::new();
 
     {
@@ -66,6 +70,12 @@ fn run_tray_app() {
 
     monitor.start();
 
+    if load_config_or_default(&config_path).caps_interceptor {
+        if let Ok(mut caps) = caps_interceptor.lock() {
+            caps.start();
+        }
+    }
+
     let mut tray = Tray::new();
     tray.set_callbacks(
         move || {
@@ -73,8 +83,26 @@ fn run_tray_app() {
                 let _ = Command::new(exe).arg("--settings").spawn();
             }
         },
-        move || unsafe {
-            PostQuitMessage(0);
+        {
+            let caps_interceptor = caps_interceptor.clone();
+            move || unsafe {
+                if let Ok(mut caps) = caps_interceptor.lock() {
+                    caps.stop();
+                }
+                PostQuitMessage(0);
+            }
+        },
+        {
+            let caps_interceptor = caps_interceptor.clone();
+            move |enabled| {
+                if let Ok(mut caps) = caps_interceptor.lock() {
+                    if enabled {
+                        caps.start();
+                    } else {
+                        caps.stop();
+                    }
+                }
+            }
         },
     );
 
@@ -83,6 +111,8 @@ fn run_tray_app() {
 }
 
 fn default_config_path() -> PathBuf {
-    let base = std::env::var_os("APPDATA").map(PathBuf::from).unwrap_or_default();
+    let base = std::env::var_os("APPDATA")
+        .map(PathBuf::from)
+        .unwrap_or_default();
     base.join("IMK").join("default_input_config.json")
 }

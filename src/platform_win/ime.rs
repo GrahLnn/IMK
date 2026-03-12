@@ -9,6 +9,8 @@ use windows::Win32::UI::Input::Ime::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, SendMessageW, WM_IME_CONTROL};
 
+use crate::platform_win::tsf::TsfController;
+
 const IMC_GETCONVERSIONMODE: usize = 0x0001;
 const IMC_SETCONVERSIONMODE: usize = 0x0002;
 const MAX_RETRY: usize = 50;
@@ -27,6 +29,11 @@ impl ImeController {
     }
 
     pub fn is_english(&self) -> Option<bool> {
+        let tsf = TsfController::new();
+        if let Some(val) = tsf.is_english() {
+            return Some(val);
+        }
+
         let hwnd = unsafe { GetForegroundWindow() };
         if hwnd.0.is_null() {
             return None;
@@ -38,7 +45,9 @@ impl ImeController {
     }
 
     pub fn set_mode(&self, mode: InputMode) -> bool {
+        let tsf = TsfController::new();
         for _ in 0..MAX_RETRY {
+            let mut switched = tsf.set_mode(mode);
             let hwnd = unsafe { GetForegroundWindow() };
             if hwnd.0.is_null() {
                 sleep(Duration::from_millis(50));
@@ -46,9 +55,16 @@ impl ImeController {
             }
 
             if imm32_set_mode(hwnd, mode) || black_magic_set_mode(hwnd, mode) {
+                switched = true;
+            }
+
+            if switched {
                 sleep(Duration::from_millis(30));
                 if let Some(is_eng) = self.is_english() {
-                    let ok = matches!((mode, is_eng), (InputMode::English, true) | (InputMode::Chinese, false));
+                    let ok = matches!(
+                        (mode, is_eng),
+                        (InputMode::English, true) | (InputMode::Chinese, false)
+                    );
                     if ok {
                         sleep(Duration::from_millis(100));
                         return true;
@@ -113,8 +129,8 @@ fn black_magic_is_english(hwnd: HWND) -> Option<bool> {
         let result = SendMessageW(
             ime_hwnd,
             WM_IME_CONTROL,
-            WPARAM(IMC_GETCONVERSIONMODE),
-            LPARAM(0),
+            Some(WPARAM(IMC_GETCONVERSIONMODE)),
+            Some(LPARAM(0)),
         );
         let mode = result.0 as u32;
         let is_chinese = (mode & IME_CMODE_NATIVE.0) != 0;
@@ -135,8 +151,8 @@ fn black_magic_set_mode(hwnd: HWND, mode: InputMode) -> bool {
         let _ = SendMessageW(
             ime_hwnd,
             WM_IME_CONTROL,
-            WPARAM(IMC_SETCONVERSIONMODE),
-            LPARAM(bits as isize),
+            Some(WPARAM(IMC_SETCONVERSIONMODE)),
+            Some(LPARAM(bits as isize)),
         );
         true
     }

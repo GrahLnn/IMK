@@ -1,5 +1,5 @@
-use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -10,8 +10,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetForegroundWindow,
     GetMessageW, GetWindowLongPtrW, PostMessageW, PostQuitMessage, RegisterClassW,
     RegisterShellHookWindow, RegisterWindowMessageW, SetWindowLongPtrW, TranslateMessage,
-    CREATESTRUCTW, GWLP_USERDATA, MSG, WNDCLASSW, WM_CLOSE, WM_DESTROY, WM_NCCREATE,
-    WS_OVERLAPPED,
+    CREATESTRUCTW, GWLP_USERDATA, MSG, WM_CLOSE, WM_DESTROY, WM_NCCREATE, WNDCLASSW, WS_OVERLAPPED,
 };
 
 const HSHELL_WINDOWACTIVATED: usize = 4;
@@ -61,66 +60,64 @@ impl WindowMonitor {
         let running = self.running.clone();
         let hwnd_slot = self.hwnd.clone();
 
-        let handle = thread::spawn(move || {
-            unsafe {
-                let hinstance = GetModuleHandleW(None).unwrap_or_default();
-                let class_name = w!("IMKShellHookWnd");
+        let handle = thread::spawn(move || unsafe {
+            let hinstance = GetModuleHandleW(None).unwrap_or_default();
+            let class_name = w!("IMKShellHookWnd");
 
-                let wnd_class = WNDCLASSW {
-                    lpfnWndProc: Some(wnd_proc),
-                    hInstance: hinstance.into(),
-                    lpszClassName: class_name,
-                    ..Default::default()
-                };
+            let wnd_class = WNDCLASSW {
+                lpfnWndProc: Some(wnd_proc),
+                hInstance: hinstance.into(),
+                lpszClassName: class_name,
+                ..Default::default()
+            };
 
-                let _ = RegisterClassW(&wnd_class);
+            let _ = RegisterClassW(&wnd_class);
 
-                let shellhook_msg = RegisterWindowMessageW(w!("SHELLHOOK"));
-                let state = Box::new(HookState {
-                    shellhook_msg,
-                    callback,
-                    generation,
-                });
-                let state_ptr = Box::into_raw(state);
+            let shellhook_msg = RegisterWindowMessageW(w!("SHELLHOOK"));
+            let state = Box::new(HookState {
+                shellhook_msg,
+                callback,
+                generation,
+            });
+            let state_ptr = Box::into_raw(state);
 
-                let hwnd = match CreateWindowExW(
-                    Default::default(),
-                    class_name,
-                    w!(""),
-                    WS_OVERLAPPED,
-                    0,
-                    0,
-                    0,
-                    0,
-                    HWND(0 as _),
-                    None,
-                    hinstance,
-                    Some(state_ptr as _),
-                ) {
-                    Ok(hwnd) => hwnd,
-                    Err(_) => {
-                        running.store(false, Ordering::SeqCst);
-                        let _ = Box::from_raw(state_ptr);
-                        return;
-                    }
-                };
-
-                let _ = RegisterShellHookWindow(hwnd);
-
-                {
-                    let mut slot = hwnd_slot.lock().unwrap();
-                    *slot = Some(hwnd.0 as isize);
+            let hwnd = match CreateWindowExW(
+                Default::default(),
+                class_name,
+                w!(""),
+                WS_OVERLAPPED,
+                0,
+                0,
+                0,
+                0,
+                None,
+                None,
+                Some(hinstance.into()),
+                Some(state_ptr as _),
+            ) {
+                Ok(hwnd) => hwnd,
+                Err(_) => {
+                    running.store(false, Ordering::SeqCst);
+                    let _ = Box::from_raw(state_ptr);
+                    return;
                 }
+            };
 
-                let mut msg = MSG::default();
-                while running.load(Ordering::SeqCst) {
-                    let ret = GetMessageW(&mut msg, HWND(0 as _), 0, 0);
-                    if ret.0 == 0 {
-                        break;
-                    }
-                    let _ = TranslateMessage(&msg);
-                    DispatchMessageW(&msg);
+            let _ = RegisterShellHookWindow(hwnd);
+
+            {
+                let mut slot = hwnd_slot.lock().unwrap();
+                *slot = Some(hwnd.0 as isize);
+            }
+
+            let mut msg = MSG::default();
+            while running.load(Ordering::SeqCst) {
+                let ret = GetMessageW(&mut msg, None, 0, 0);
+                if ret.0 == 0 {
+                    break;
                 }
+                let _ = TranslateMessage(&msg);
+                DispatchMessageW(&msg);
             }
         });
 
@@ -134,7 +131,7 @@ impl WindowMonitor {
         if let Some(raw) = self.hwnd.lock().unwrap().take() {
             unsafe {
                 let hwnd = HWND(raw as *mut core::ffi::c_void);
-                let _ = PostMessageW(hwnd, WM_CLOSE, WPARAM(0), LPARAM(0));
+                let _ = PostMessageW(Some(hwnd), WM_CLOSE, WPARAM(0), LPARAM(0));
             }
         }
         if let Some(handle) = self.thread.take() {
@@ -149,18 +146,15 @@ impl Drop for WindowMonitor {
     }
 }
 
-fn schedule_confirmation(
-    callback: Arc<dyn Fn(HWND) + Send + Sync>,
-    generation: Arc<AtomicU64>,
-) {
-    let gen = generation.fetch_add(1, Ordering::SeqCst) + 1;
+fn schedule_confirmation(callback: Arc<dyn Fn(HWND) + Send + Sync>, generation: Arc<AtomicU64>) {
+    let generation_id = generation.fetch_add(1, Ordering::SeqCst) + 1;
     thread::spawn(move || {
         let mut last = unsafe { GetForegroundWindow() };
         let mut stable_start = Instant::now();
 
         loop {
             thread::sleep(Duration::from_millis(CHECK_INTERVAL_MS));
-            if generation.load(Ordering::SeqCst) != gen {
+            if generation.load(Ordering::SeqCst) != generation_id {
                 return;
             }
 
@@ -181,12 +175,12 @@ fn schedule_confirmation(
             }
         }
 
-        if generation.load(Ordering::SeqCst) != gen {
+        if generation.load(Ordering::SeqCst) != generation_id {
             return;
         }
 
         thread::sleep(Duration::from_millis(POST_STABILIZATION_DELAY_MS));
-        if generation.load(Ordering::SeqCst) != gen {
+        if generation.load(Ordering::SeqCst) != generation_id {
             return;
         }
 
@@ -201,13 +195,13 @@ unsafe extern "system" fn wnd_proc(
     lparam: LPARAM,
 ) -> LRESULT {
     if msg == WM_NCCREATE {
-        let create: &CREATESTRUCTW = &*(lparam.0 as *const CREATESTRUCTW);
-        let _ = SetWindowLongPtrW(hwnd, GWLP_USERDATA, create.lpCreateParams as isize);
+        let create: &CREATESTRUCTW = unsafe { &*(lparam.0 as *const CREATESTRUCTW) };
+        let _ = unsafe { SetWindowLongPtrW(hwnd, GWLP_USERDATA, create.lpCreateParams as isize) };
     }
 
-    let state_ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut HookState;
+    let state_ptr = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) } as *mut HookState;
     if !state_ptr.is_null() {
-        let state = &*state_ptr;
+        let state = unsafe { &*state_ptr };
         if msg == state.shellhook_msg && wparam.0 as usize == HSHELL_WINDOWACTIVATED {
             schedule_confirmation(state.callback.clone(), state.generation.clone());
             return LRESULT(0);
@@ -216,17 +210,17 @@ unsafe extern "system" fn wnd_proc(
 
     match msg {
         WM_CLOSE => {
-            let _ = DestroyWindow(hwnd);
+            let _ = unsafe { DestroyWindow(hwnd) };
             LRESULT(0)
         }
         WM_DESTROY => {
-            let ptr = SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0) as *mut HookState;
+            let ptr = unsafe { SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0) } as *mut HookState;
             if !ptr.is_null() {
-                let _ = Box::from_raw(ptr);
+                let _ = unsafe { Box::from_raw(ptr) };
             }
-            PostQuitMessage(0);
+            unsafe { PostQuitMessage(0) };
             LRESULT(0)
         }
-        _ => DefWindowProcW(hwnd, msg, wparam, lparam),
+        _ => unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },
     }
 }

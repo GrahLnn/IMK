@@ -6,13 +6,15 @@ use gpui::{
     actions, div, fill, hsla, point, prelude::*, px, rgb, rgba, size, App, Bounds, ClipboardItem,
     Context, CursorStyle, Element, ElementId, ElementInputHandler, Entity, EntityInputHandler,
     FocusHandle, Focusable, GlobalElementId, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, PaintQuad, Pixels, Point, Render, ShapedLine, SharedString, Style, TextRun,
-    UTF16Selection, UnderlineStyle, Window, WindowBounds, WindowOptions,
+    MouseUpEvent, PaintQuad, Pixels, Point, Render, ShapedLine, SharedString,
+    StatefulInteractiveElement, Style, TextRun, UTF16Selection, UnderlineStyle, Window,
+    WindowBounds, WindowOptions,
 };
 use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, RefreshKind, System};
 use unicode_segmentation::UnicodeSegmentation;
 
-use crate::core::config::InputConfig;
+use crate::core::config::{load_config_or_default, save_config, InputConfig};
+use crate::core::process::normalize_process_name;
 
 actions!(
     text_input,
@@ -38,6 +40,7 @@ pub struct SettingsWindow {
     chn_input: Option<Entity<TextInput>>,
     processes: Vec<String>,
     config_path: PathBuf,
+    caps_interceptor: bool,
 }
 
 impl SettingsWindow {
@@ -47,6 +50,7 @@ impl SettingsWindow {
             chn_input: None,
             processes: load_process_list(),
             config_path: default_config_path(),
+            caps_interceptor: InputConfig::default().caps_interceptor,
         }
     }
 
@@ -72,16 +76,16 @@ impl SettingsWindow {
         }
     }
 
-    fn load_existing_config(&self, cx: &mut Context<Self>) {
-        if let Ok(cfg) = InputConfig::from_file(&self.config_path) {
-            if let Some(eng) = self.eng_input.as_ref() {
-                let text = cfg.eng.iter().cloned().collect::<Vec<_>>().join(", ");
-                eng.update(cx, |input, _| input.set_text(text));
-            }
-            if let Some(chn) = self.chn_input.as_ref() {
-                let text = cfg.chinese.iter().cloned().collect::<Vec<_>>().join(", ");
-                chn.update(cx, |input, _| input.set_text(text));
-            }
+    fn load_existing_config(&mut self, cx: &mut Context<Self>) {
+        let cfg = load_config_or_default(&self.config_path);
+        self.caps_interceptor = cfg.caps_interceptor;
+        if let Some(eng) = self.eng_input.as_ref() {
+            let text = cfg.eng.iter().cloned().collect::<Vec<_>>().join(", ");
+            eng.update(cx, |input, _| input.set_text(text));
+        }
+        if let Some(chn) = self.chn_input.as_ref() {
+            let text = cfg.chinese.iter().cloned().collect::<Vec<_>>().join(", ");
+            chn.update(cx, |input, _| input.set_text(text));
         }
     }
 
@@ -100,14 +104,17 @@ impl SettingsWindow {
         let eng = parse_list(&eng_text);
         let chinese = parse_list(&chn_text);
 
-        let cfg = InputConfig { eng, chinese };
+        let cfg = InputConfig {
+            eng,
+            chinese,
+            caps_interceptor: self.caps_interceptor,
+        };
 
-        if let Some(dir) = self.config_path.parent() {
-            let _ = std::fs::create_dir_all(dir);
-        }
-        if let Ok(text) = cfg.to_json_pretty() {
-            let _ = std::fs::write(&self.config_path, text);
-        }
+        let _ = save_config(&self.config_path, &cfg);
+    }
+
+    fn on_toggle_caps(&mut self, _: &MouseUpEvent, _window: &mut Window, _cx: &mut Context<Self>) {
+        self.caps_interceptor = !self.caps_interceptor;
     }
 }
 
@@ -117,25 +124,38 @@ impl Render for SettingsWindow {
 
         let eng_input = self.eng_input.as_ref().unwrap().clone();
         let chn_input = self.chn_input.as_ref().unwrap().clone();
+        let caps_enabled = self.caps_interceptor;
 
         div()
             .flex()
             .size_full()
             .gap_4()
             .p(px(16.0))
+            .bg(rgb(0xf7f7f7))
             .child(
                 div()
                     .flex()
                     .flex_col()
                     .w(px(240.0))
+                    .h_full()
                     .bg(rgb(0xf2f2f2))
                     .p(px(12.0))
                     .gap_2()
                     .child(div().text_sm().child("运行中进程"))
-                    .children(
-                        self.processes
-                            .iter()
-                            .map(|p| div().text_sm().child(p.clone())),
+                    .child(
+                        div()
+                            .id("process_list")
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .flex_1()
+                            .overflow_y_scroll()
+                            .scrollbar_width(px(8.0))
+                            .children(
+                                self.processes
+                                    .iter()
+                                    .map(|p| div().text_sm().child(p.clone())),
+                            ),
                     ),
             )
             .child(
@@ -148,6 +168,31 @@ impl Render for SettingsWindow {
                     .child(text_input_view(eng_input))
                     .child(div().text_sm().child("中文应用（逗号分隔）"))
                     .child(text_input_view(chn_input))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .px_2()
+                            .py_2()
+                            .rounded_md()
+                            .bg(rgb(0xf2f2f2))
+                            .cursor(CursorStyle::PointingHand)
+                            .child(
+                                div()
+                                    .w(px(16.0))
+                                    .h(px(16.0))
+                                    .border_1()
+                                    .border_color(rgb(0x888888))
+                                    .bg(if caps_enabled {
+                                        rgb(0x2d6cdf)
+                                    } else {
+                                        rgb(0xffffff)
+                                    }),
+                            )
+                            .child(div().text_sm().child("Caps 拦截"))
+                            .on_mouse_up(MouseButton::Left, cx.listener(Self::on_toggle_caps)),
+                    )
                     .child(
                         div()
                             .bg(rgb(0x2d6cdf))
@@ -165,13 +210,13 @@ impl Render for SettingsWindow {
 }
 
 fn load_process_list() -> Vec<String> {
-    let refresh = RefreshKind::new().with_processes(ProcessRefreshKind::new());
+    let refresh = RefreshKind::nothing().with_processes(ProcessRefreshKind::everything());
     let mut sys = System::new_with_specifics(refresh);
-    sys.refresh_processes(ProcessesToUpdate::All);
+    sys.refresh_processes(ProcessesToUpdate::All, true);
     let mut items: Vec<String> = sys
         .processes()
         .values()
-        .map(|p| format!("{}.exe", p.name().to_string_lossy()))
+        .map(|p| normalize_process_name(p.name().to_string_lossy().as_ref()))
         .collect();
     items.sort();
     items.dedup();

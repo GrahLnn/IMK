@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 pub struct InputConfig {
     pub eng: HashSet<String>,
     pub chinese: HashSet<String>,
+    pub caps_interceptor: bool,
 }
 
 impl Default for InputConfig {
@@ -15,6 +16,7 @@ impl Default for InputConfig {
         Self {
             eng: HashSet::new(),
             chinese: HashSet::new(),
+            caps_interceptor: default_caps_interceptor(),
         }
     }
 }
@@ -25,6 +27,8 @@ struct RawConfig {
     eng: Vec<String>,
     #[serde(default, rename = "CHINESE")]
     chinese: Vec<String>,
+    #[serde(default = "default_caps_interceptor", rename = "CAPS_INTERCEPTOR")]
+    caps_interceptor: bool,
 }
 
 impl InputConfig {
@@ -33,6 +37,7 @@ impl InputConfig {
         Ok(Self {
             eng: raw.eng.into_iter().collect(),
             chinese: raw.chinese.into_iter().collect(),
+            caps_interceptor: raw.caps_interceptor,
         })
     }
 
@@ -46,7 +51,32 @@ impl InputConfig {
         let raw = RawConfig {
             eng: self.eng.iter().cloned().collect(),
             chinese: self.chinese.iter().cloned().collect(),
+            caps_interceptor: self.caps_interceptor,
         };
         Ok(serde_json::to_string_pretty(&raw)?)
     }
+}
+
+pub fn load_config_or_default(path: impl AsRef<Path>) -> InputConfig {
+    InputConfig::from_file(path).unwrap_or_default()
+}
+
+pub fn save_config(path: impl AsRef<Path>, cfg: &InputConfig) -> anyhow::Result<()> {
+    let path = path.as_ref();
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let text = cfg.to_json_pretty()?;
+    std::fs::write(path, text)?;
+    Ok(())
+}
+
+pub fn update_caps_interceptor(path: impl AsRef<Path>, enabled: bool) -> anyhow::Result<()> {
+    let mut cfg = load_config_or_default(&path);
+    cfg.caps_interceptor = enabled;
+    save_config(path, &cfg)
+}
+
+fn default_caps_interceptor() -> bool {
+    true
 }

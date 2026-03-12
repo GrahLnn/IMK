@@ -9,6 +9,7 @@
 - ⚙️ **简单配置**：通过图形界面轻松配置应用程序的输入法偏好
 - 📁 **配置文件管理**：支持直接编辑配置文件和打开配置文件夹
 - 🚀 **开机自启**：可设置为开机自动启动
+- ⌨️ **Caps 键增强**：短按 CapsLock 发送 `Ctrl + Space`，长按打开 Caps，按 Shift 关闭 Caps
 
 ## 使用方法
 
@@ -59,7 +60,8 @@
     "wechat.exe",
     "qq.exe",
     "chrome.exe"
-  ]
+  ],
+  "CAPS_INTERCEPTOR": true
 }
 ```
 
@@ -89,6 +91,7 @@
 - 保存后配置文件写入到 `%APPDATA%\IMK\default_input_config.json`
 - 切换不同应用窗口时输入法模式自动切换
 - 开机自启开关可创建/移除启动快捷方式
+- 勾选 Caps 拦截后：短按 CapsLock 触发 Ctrl+Space，长按打开 Caps，按 Shift 关闭 Caps
 
 ## 许可证
 

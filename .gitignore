@@ -2,3 +2,5 @@ bin/
 obj/
 .worktrees/
 target/
+.bg-shell/
+temp/
