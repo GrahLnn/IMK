@@ -9,8 +9,6 @@ use windows::Win32::UI::Input::Ime::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, SendMessageW, WM_IME_CONTROL};
 
-use crate::platform_win::tsf::TsfController;
-
 const IMC_GETCONVERSIONMODE: usize = 0x0001;
 const IMC_SETCONVERSIONMODE: usize = 0x0002;
 const MAX_RETRY: usize = 50;
@@ -29,11 +27,6 @@ impl ImeController {
     }
 
     pub fn is_english(&self) -> Option<bool> {
-        let tsf = TsfController::new();
-        if let Some(val) = tsf.is_english() {
-            return Some(val);
-        }
-
         let hwnd = unsafe { GetForegroundWindow() };
         if hwnd.0.is_null() {
             return None;
@@ -45,9 +38,7 @@ impl ImeController {
     }
 
     pub fn set_mode(&self, mode: InputMode) -> bool {
-        let tsf = TsfController::new();
         for _ in 0..MAX_RETRY {
-            let mut switched = tsf.set_mode(mode);
             let hwnd = unsafe { GetForegroundWindow() };
             if hwnd.0.is_null() {
                 sleep(Duration::from_millis(50));
@@ -55,10 +46,6 @@ impl ImeController {
             }
 
             if imm32_set_mode(hwnd, mode) || black_magic_set_mode(hwnd, mode) {
-                switched = true;
-            }
-
-            if switched {
                 sleep(Duration::from_millis(30));
                 if let Some(is_eng) = self.is_english() {
                     let ok = matches!(
